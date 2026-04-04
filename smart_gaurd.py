@@ -5,8 +5,10 @@ import pickle
 import numpy as np
 import subprocess
 from sklearn.neighbors import KNeighborsClassifier
+import requests
 
-
+BOT_TOKEN = "TOKEN"
+CHAT_ID = "CHAT_ID"
 CAPTURE_DIR = "captures"
 DATA_DIR = "data"
 CASCADE_PATH = os.path.join(DATA_DIR, "haarcascade_frontalface_default.xml")
@@ -47,6 +49,11 @@ def load_face_model():
     knn = KNeighborsClassifier(n_neighbors=5)
     knn.fit(faces, labels)
     return knn
+
+def send_telegram(photo_path, message="Alert!"):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    with open(photo_path, 'rb') as photo:
+        requests.post(url, data={'chat_id': CHAT_ID, 'caption': message}, files={'photo': photo})
 
 
 def main():
@@ -135,6 +142,7 @@ def main():
 
                     if name == "Unknown":
                         speak("Unknown person detected")
+                        send_telegram(filename, "🚨 Unknown person detected!")
                     else:
                         speak(f"Welcome {name}")
 
