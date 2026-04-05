@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
 
 
@@ -8,13 +8,13 @@ class StatusResponse(BaseModel):
     assistant_online: bool
     last_command: Optional[str]
     last_event: Optional[str]
-    last_event_time: Optional[float]
+    last_event_time: float
     telegram_enabled: bool
     stream_clients: int
 
 
 class CommandRequest(BaseModel):
-    command: str = Field(..., min_length=1, max_length=100)
+    command: str
 
 
 class ActionResponse(BaseModel):
