@@ -26,3 +26,16 @@ class GuardToggleResponse(BaseModel):
     ok: bool
     guard_enabled: bool
     message: str
+
+class AlertItem(BaseModel):
+    id: int
+    event_type: str
+    person_name: Optional[str]
+    image_path: Optional[str]
+    message: Optional[str]
+    created_at: float
+
+
+class AlertsResponse(BaseModel):
+    ok: bool
+    alerts: list[AlertItem]
