@@ -9,17 +9,29 @@ from app.schemas import (
     CommandRequest,
     ActionResponse,
     GuardToggleResponse,
+    AlertsResponse,
+    AlertItem,
 )
 from app.state import StateStore
 from app.guard_service import GuardService
 from app.camera_manager import CameraManager
 from app.command_router import CommandRouter
+from app.alerts_store import AlertsStore
 
 app = FastAPI(title="Anantrit Core", version="0.1.0")
 
 state = StateStore()
-camera = CameraManager(state=state, camera_index=0, width=640, height=480)
-guard = GuardService(state)
+alerts_store = AlertsStore()
+camera = CameraManager(state=state, width=640, height=480)
+
+guard = GuardService(
+    state=state,
+    camera_manager=camera,
+    alerts_store=alerts_store,
+    telegram_token="YOUR_NEW_TOKEN",
+    telegram_chat_id="YOUR_CHAT_ID",
+)
+
 router = CommandRouter(
     state=state,
     on_guard_start=guard.start,
@@ -29,14 +41,15 @@ router = CommandRouter(
 
 @app.on_event("startup")
 def startup_event() -> None:
+    state.update(assistant_online=True)
+
     try:
         camera.start()
+        print("Camera started successfully")
         state.mark_event("Camera started")
     except Exception as e:
+        print("Camera startup error:", e)
         state.mark_event(f"Camera failed: {e}")
-
-    state.update(assistant_online=True)
-    state.mark_event("Anantrit backend started")
 
 
 @app.on_event("shutdown")
@@ -71,6 +84,15 @@ def stop_guard() -> GuardToggleResponse:
     return GuardToggleResponse(ok=True, guard_enabled=False, message="Guard stopped")
 
 
+@app.get("/alerts", response_model=AlertsResponse)
+def get_alerts():
+    items = alerts_store.list_alerts(limit=50)
+    return AlertsResponse(
+        ok=True,
+        alerts=[AlertItem(**item) for item in items],
+    )
+
+
 @app.get("/")
 def root():
     return JSONResponse(
@@ -80,6 +102,8 @@ def root():
             "docs": "/docs",
             "status": "/status",
             "stream": "/stream",
+            "snapshot": "/snapshot",
+            "alerts": "/alerts",
         }
     )
 
