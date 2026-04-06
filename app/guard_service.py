@@ -8,13 +8,12 @@ from typing import Optional
 import cv2
 import numpy as np
 import requests
-from sklearn.neighbors import KNeighborsClassifier
 
 from app.state import StateStore
 
 
 class GuardService:
-    FACE_SIZE = (64, 64)
+    FACE_SIZE = (160, 160)
 
     def __init__(
         self,
@@ -32,14 +31,16 @@ class GuardService:
         self.running = False
         self.thread: Optional[threading.Thread] = None
 
-        self.capture_dir = "captures"
-        self.data_dir = "data"
-        self.names_path = os.path.join(self.data_dir, "names.pkl")
-        self.faces_path = os.path.join(self.data_dir, "faces_data.pkl")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        self.capture_dir = os.path.abspath(os.path.join(base_dir, "..", "captures"))
+        self.data_dir = os.path.abspath(os.path.join(base_dir, "data"))
+        self.model_path = os.path.join(self.data_dir, "face_model_lbph.yml")
+        self.labels_path = os.path.join(self.data_dir, "face_labels.pkl")
 
         self.motion_area_threshold = 1800
         self.save_cooldown_seconds = 5
-        self.unknown_distance_threshold = 0.85
+        self.lbph_confidence_threshold = 65.0
         self.last_save_time = 0.0
         self.last_welcome_time: dict[str, float] = {}
         self.welcome_cooldown_seconds = 8
@@ -70,7 +71,7 @@ class GuardService:
         if self.face_detector.empty():
             raise RuntimeError(f"Could not load Haar cascade: {cascade_path}")
 
-        self.knn = self._load_face_model()
+        self.face_model = self._load_face_model()
         os.makedirs(self.capture_dir, exist_ok=True)
 
     def speak(self, text: str) -> None:
@@ -81,7 +82,7 @@ class GuardService:
 
     def _preprocess_face(self, frame: np.ndarray, x: int, y: int, w: int, h: int) -> Optional[np.ndarray]:
         h_img, w_img = frame.shape[:2]
-        pad = int(0.15 * max(w, h))
+        pad = int(0.18 * max(w, h))
         x1 = max(0, x - pad)
         y1 = max(0, y - pad)
         x2 = min(w_img, x + w + pad)
@@ -99,35 +100,25 @@ class GuardService:
         except Exception:
             return None
 
-        vec = gray.astype(np.float32) / 255.0
-        return vec.flatten().reshape(1, -1)
+        return gray
 
-    def _load_face_model(self) -> KNeighborsClassifier:
-        if not os.path.isfile(self.names_path):
-            raise FileNotFoundError(f"Missing file: {self.names_path}")
-        if not os.path.isfile(self.faces_path):
-            raise FileNotFoundError(f"Missing file: {self.faces_path}")
+    def _load_face_model(self):
+        if not os.path.isfile(self.model_path):
+            raise FileNotFoundError(f"Missing file: {self.model_path}")
+        if not os.path.isfile(self.labels_path):
+            raise FileNotFoundError(f"Missing file: {self.labels_path}")
 
-        with open(self.names_path, "rb") as f:
-            labels = pickle.load(f)
-        with open(self.faces_path, "rb") as f:
-            faces = pickle.load(f)
+        if not hasattr(cv2, "face"):
+            raise RuntimeError("cv2.face is not available. Install opencv-contrib-python.")
 
-        faces = np.asarray(faces, dtype=np.float32)
-        labels = np.asarray(labels)
+        recognizer = cv2.face.LBPHFaceRecognizer_create()
+        recognizer.read(self.model_path)
 
-        if len(faces) == 0 or len(labels) == 0:
-            raise ValueError("Training data is empty")
-        if len(faces) != len(labels):
-            raise ValueError("faces_data.pkl and names.pkl lengths do not match")
+        with open(self.labels_path, "rb") as f:
+            labels_map = pickle.load(f)
 
-        n_neighbors = min(3, len(faces))
-        if n_neighbors < 1:
-            raise ValueError("Not enough training data")
-
-        knn = KNeighborsClassifier(n_neighbors=n_neighbors, weights="distance")
-        knn.fit(faces, labels)
-        return knn
+        self.id_to_name = {v: k for k, v in labels_map.items()}
+        return recognizer
 
     def _send_telegram(self, photo_path: str, message: str) -> None:
         if not self.telegram_token or not self.telegram_chat_id:
@@ -188,24 +179,20 @@ class GuardService:
         return False
 
     def _recognize_face(self, frame: np.ndarray, x: int, y: int, w: int, h: int) -> str:
-        vec = self._preprocess_face(frame, x, y, w, h)
-        if vec is None:
+        face_img = self._preprocess_face(frame, x, y, w, h)
+        if face_img is None:
             return "Unknown"
 
-        prediction = self.knn.predict(vec)[0]
-        distances, indices = self.knn.kneighbors(vec, n_neighbors=min(3, self.knn.n_neighbors))
-        mean_distance = float(np.mean(distances[0]))
+        label_id, confidence = self.face_model.predict(face_img)
 
-        if mean_distance > self.unknown_distance_threshold:
+        print("LBPH label_id:", label_id)
+        print("LBPH confidence:", confidence)
+
+        if confidence > self.lbph_confidence_threshold:
+            print("Rejected: confidence too weak")
             return "Unknown"
 
-        neighbor_labels = [self.knn._y[idx] for idx in indices[0]]
-        same_count = sum(1 for lbl in neighbor_labels if lbl == prediction)
-
-        if same_count < 2 and len(neighbor_labels) >= 2:
-            return "Unknown"
-
-        return str(prediction)
+        return self.id_to_name.get(label_id, "Unknown")
 
     def _loop(self) -> None:
         while self.running:
