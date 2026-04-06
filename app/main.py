@@ -28,8 +28,8 @@ guard = GuardService(
     state=state,
     camera_manager=camera,
     alerts_store=alerts_store,
-    telegram_token="8598505116:AAHsH_uPijhH7L_3_ELqqfRFXBsNCHjpO40",
-    telegram_chat_id="1678217255",
+    telegram_token="your_token",
+    telegram_chat_id="your_chat_id",
 )
 
 router = CommandRouter(
