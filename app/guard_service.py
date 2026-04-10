@@ -40,7 +40,7 @@ class GuardService:
 
         self.motion_area_threshold = 1800
         self.save_cooldown_seconds = 5
-        self.lbph_confidence_threshold = 65.0
+        self.lbph_confidence_threshold = 69.0
         self.last_save_time = 0.0
         self.last_welcome_time: dict[str, float] = {}
         self.welcome_cooldown_seconds = 8
