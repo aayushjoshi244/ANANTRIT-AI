@@ -55,6 +55,12 @@ class GuardService:
 
         self.min_face_area = 120 * 120
 
+        self.locked_name: Optional[str] = None
+        self.locked_face_box: Optional[tuple[int, int, int, int]] = None
+        self.lock_expiry_time = 0.0
+        self.identity_lock_seconds = 2.0
+        self.lock_match_distance_px = 90
+
         self.prev_motion_frame: Optional[np.ndarray] = None
         self.frame_skip = 2
         self.frame_counter = 0
@@ -221,6 +227,44 @@ class GuardService:
             self.last_unknown_alert_time = now
             return True
         return False
+    def _face_box_center(self, box: tuple[int, int, int, int]) -> tuple[int, int]:
+        x, y, w, h = box
+        return (x + w // 2, y + h // 2)
+
+    def _is_same_face_position(
+        self,
+        box1: tuple[int, int, int, int],
+        box2: tuple[int, int, int, int],
+    ) -> bool:
+        c1x, c1y = self._face_box_center(box1)
+        c2x, c2y = self._face_box_center(box2)
+        return abs(c1x - c2x) <= self.lock_match_distance_px and abs(c1y - c2y) <= self.lock_match_distance_px
+
+    def _set_identity_lock(self, name: str, box: tuple[int, int, int, int]) -> None:
+        self.locked_name = name
+        self.locked_face_box = box
+        self.lock_expiry_time = time.time() + self.identity_lock_seconds
+
+    def _clear_identity_lock(self) -> None:
+        self.locked_name = None
+        self.locked_face_box = None
+        self.lock_expiry_time = 0.0
+
+    def _get_locked_identity(self, box: tuple[int, int, int, int]) -> Optional[str]:
+        if self.locked_name is None or self.locked_face_box is None:
+            return None
+
+        if time.time() > self.lock_expiry_time:
+            self._clear_identity_lock()
+            return None
+
+        if not self._is_same_face_position(self.locked_face_box, box):
+            return None
+
+        self.locked_face_box = box
+        self.lock_expiry_time = time.time() + self.identity_lock_seconds
+        return self.locked_name
+    
 
     def _recognize_face(self, frame: np.ndarray, x: int, y: int, w: int, h: int) -> tuple[str, float]:
         face_img = self._preprocess_face(frame, x, y, w, h)
@@ -274,6 +318,7 @@ class GuardService:
 
             if len(faces) == 0:
                 self.recognition_history.clear()
+                self._clear_identity_lock()
                 self.state.mark_event("Motion detected")
                 time.sleep(0.05)
                 continue
@@ -284,12 +329,21 @@ class GuardService:
                 if w * h < self.min_face_area:
                     continue
 
-                predicted_name, confidence = self._recognize_face(frame, x, y, w, h)
-                self._push_recognition(predicted_name, confidence)
+                current_box = (x, y, w, h)
 
-                stable_name = self._stable_decision()
-                if stable_name == "Pending":
-                    continue
+                locked_name = self._get_locked_identity(current_box)
+                if locked_name is not None:
+                    stable_name = locked_name
+                else:
+                    predicted_name, confidence = self._recognize_face(frame, x, y, w, h)
+                    self._push_recognition(predicted_name, confidence)
+
+                    stable_name = self._stable_decision()
+                    if stable_name == "Pending":
+                        continue
+
+                    if stable_name != "Unknown":
+                        self._set_identity_lock(stable_name, current_box)
 
                 now = time.time()
                 if now - self.last_save_time < self.save_cooldown_seconds:
