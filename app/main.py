@@ -1,5 +1,6 @@
 import os
 import time
+import cv2
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -107,18 +108,63 @@ def root():
         }
     )
 
+def draw_guard_overlay(frame):
+    name, box, confidence = guard.get_overlay()
+
+    if name is None or box is None:
+        return frame
+
+    x, y, w, h = box
+
+    if name == "Unknown":
+        color = (0, 0, 255)
+        label = "Unknown"
+    else:
+        color = (0, 255, 0)
+        label = str(name)
+
+    if confidence is not None:
+        label = f"{label} ({confidence:.1f})"
+
+    cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+
+    text_y = max(30, y - 10)
+    text_width = max(180, len(label) * 12)
+    cv2.rectangle(frame, (x, text_y - 25), (x + text_width, text_y + 5), color, -1)
+
+    cv2.putText(
+        frame,
+        label,
+        (x + 5, text_y - 5),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+    return frame
+
 
 def mjpeg_generator():
     while True:
-        frame = camera.get_jpeg_frame()
+        frame = camera.get_frame()
 
         if frame is None:
             time.sleep(0.05)
             continue
 
+        frame = frame.copy()
+        frame = draw_guard_overlay(frame)
+
+        ok, buffer = cv2.imencode(".jpg", frame)
+        if not ok:
+            time.sleep(0.05)
+            continue
+
         yield (
             b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
         )
 
         time.sleep(0.03)

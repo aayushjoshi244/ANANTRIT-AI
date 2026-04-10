@@ -60,6 +60,12 @@ class GuardService:
         self.lock_expiry_time = 0.0
         self.identity_lock_seconds = 2.0
         self.lock_match_distance_px = 90
+        self.overlay_lock = threading.Lock()
+        self.overlay_name: Optional[str] = None
+        self.overlay_box: Optional[tuple[int, int, int, int]] = None
+        self.overlay_confidence: Optional[float] = None
+        self.overlay_until = 0.0
+        self.overlay_hold_seconds = 1.5
 
         self.prev_motion_frame: Optional[np.ndarray] = None
         self.frame_skip = 2
@@ -265,6 +271,30 @@ class GuardService:
         self.lock_expiry_time = time.time() + self.identity_lock_seconds
         return self.locked_name
     
+    def _set_overlay(
+        self,
+        name: str,
+        box: tuple[int, int, int, int],
+        confidence: Optional[float] = None,
+    ) -> None:
+        with self.overlay_lock:
+            self.overlay_name = name
+            self.overlay_box = box
+            self.overlay_confidence = confidence
+            self.overlay_until = time.time() + self.overlay_hold_seconds
+
+    def _clear_overlay_if_expired(self) -> None:
+        with self.overlay_lock:
+            if time.time() > self.overlay_until:
+                self.overlay_name = None
+                self.overlay_box = None
+                self.overlay_confidence = None
+
+    def get_overlay(self) -> tuple[Optional[str], Optional[tuple[int, int, int, int]], Optional[float]]:
+        self._clear_overlay_if_expired()
+        with self.overlay_lock:
+            return self.overlay_name, self.overlay_box, self.overlay_confidence
+    
 
     def _recognize_face(self, frame: np.ndarray, x: int, y: int, w: int, h: int) -> tuple[str, float]:
         face_img = self._preprocess_face(frame, x, y, w, h)
@@ -332,6 +362,8 @@ class GuardService:
                 current_box = (x, y, w, h)
 
                 locked_name = self._get_locked_identity(current_box)
+                confidence = None
+
                 if locked_name is not None:
                     stable_name = locked_name
                 else:
@@ -344,6 +376,8 @@ class GuardService:
 
                     if stable_name != "Unknown":
                         self._set_identity_lock(stable_name, current_box)
+
+                self._set_overlay(stable_name, current_box, confidence)
 
                 now = time.time()
                 if now - self.last_save_time < self.save_cooldown_seconds:
