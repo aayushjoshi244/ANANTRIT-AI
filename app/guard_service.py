@@ -46,6 +46,15 @@ class GuardService:
         self.welcome_cooldown_seconds = 8
         self.alerts_store = alerts_store
 
+        self.recognition_history: list[tuple[str, float]] = []
+        self.recognition_history_size = 8
+        self.min_consistent_matches = 4
+
+        self.last_unknown_alert_time = 0.0
+        self.unknown_alert_cooldown_seconds = 15
+
+        self.min_face_area = 120 * 120
+
         self.prev_motion_frame: Optional[np.ndarray] = None
         self.frame_skip = 2
         self.frame_counter = 0
@@ -177,11 +186,46 @@ class GuardService:
             self.last_welcome_time[name] = now
             return True
         return False
+    
+    def _push_recognition(self, name: str, confidence: float) -> None:
+        self.recognition_history.append((name, confidence))
+        if len(self.recognition_history) > self.recognition_history_size:
+            self.recognition_history.pop(0)
 
-    def _recognize_face(self, frame: np.ndarray, x: int, y: int, w: int, h: int) -> str:
+    def _stable_decision(self) -> str:
+        if len(self.recognition_history) < self.min_consistent_matches:
+            return "Pending"
+
+        known_votes: dict[str, int] = {}
+        unknown_votes = 0
+
+        for name, confidence in self.recognition_history:
+            if name == "Unknown":
+                unknown_votes += 1
+            else:
+                known_votes[name] = known_votes.get(name, 0) + 1
+
+        if known_votes:
+            best_name, best_count = max(known_votes.items(), key=lambda x: x[1])
+            if best_count >= self.min_consistent_matches:
+                return best_name
+
+        if unknown_votes >= self.min_consistent_matches:
+            return "Unknown"
+
+        return "Pending"
+
+    def _should_send_unknown_alert(self) -> bool:
+        now = time.time()
+        if now - self.last_unknown_alert_time >= self.unknown_alert_cooldown_seconds:
+            self.last_unknown_alert_time = now
+            return True
+        return False
+
+    def _recognize_face(self, frame: np.ndarray, x: int, y: int, w: int, h: int) -> tuple[str, float]:
         face_img = self._preprocess_face(frame, x, y, w, h)
         if face_img is None:
-            return "Unknown"
+            return "Unknown", 999.0
 
         label_id, confidence = self.face_model.predict(face_img)
 
@@ -190,9 +234,9 @@ class GuardService:
 
         if confidence > self.lbph_confidence_threshold:
             print("Rejected: confidence too weak")
-            return "Unknown"
+            return "Unknown", float(confidence)
 
-        return self.id_to_name.get(label_id, "Unknown")
+        return self.id_to_name.get(label_id, "Unknown"), float(confidence)
 
     def _loop(self) -> None:
         while self.running:
@@ -229,6 +273,7 @@ class GuardService:
             )
 
             if len(faces) == 0:
+                self.recognition_history.clear()
                 self.state.mark_event("Motion detected")
                 time.sleep(0.05)
                 continue
@@ -236,25 +281,34 @@ class GuardService:
             faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
 
             for (x, y, w, h) in faces[:1]:
-                name = self._recognize_face(frame, x, y, w, h)
+                if w * h < self.min_face_area:
+                    continue
+
+                predicted_name, confidence = self._recognize_face(frame, x, y, w, h)
+                self._push_recognition(predicted_name, confidence)
+
+                stable_name = self._stable_decision()
+                if stable_name == "Pending":
+                    continue
 
                 now = time.time()
                 if now - self.last_save_time < self.save_cooldown_seconds:
                     continue
 
                 timestamp = time.strftime("%Y%m%d-%H%M%S")
-                filename = os.path.join(self.capture_dir, f"{name}_{timestamp}.jpg")
+                filename = os.path.join(self.capture_dir, f"{stable_name}_{timestamp}.jpg")
                 cv2.imwrite(filename, frame)
 
-                if name == "Unknown":
-                    self.speak("Unknown person detected")
-                    self._send_telegram(filename, "Unknown person detected")
-                    self.state.mark_event("Unknown person detected")
+                if stable_name == "Unknown":
+                    if self._should_send_unknown_alert():
+                        self.speak("Unknown person detected")
+                        self._send_telegram(filename, "Unknown person detected")
+                        self.state.mark_event("Unknown person detected")
+                        self.last_save_time = now
                 else:
-                    if self._should_welcome(name):
-                        self.speak(f"Welcome {name}")
-                    self.state.mark_event(f"Recognized {name}")
-
-                self.last_save_time = now
+                    if self._should_welcome(stable_name):
+                        self.speak(f"Welcome {stable_name}")
+                        self.state.mark_event(f"Recognized {stable_name}")
+                        self.last_save_time = now
 
             time.sleep(0.05)
